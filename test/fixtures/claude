@@ -1,0 +1,4 @@
+#!/usr/bin/env node
+// Shim that gives `spawnSync('claude', ...)` a literal `claude` filename to
+// resolve via PATH while keeping the implementation in fake-claude.js.
+import('./fake-claude.js');

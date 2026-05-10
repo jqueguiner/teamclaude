@@ -1,0 +1,3 @@
+#!/usr/bin/env node
+// Shim for the always-crashing fixture. See fake-claude-fail.js.
+import('./fake-claude-fail.js');
