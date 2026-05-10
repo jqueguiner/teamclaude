@@ -376,6 +376,29 @@ async function runCommand() {
     process.exit(helpResult.status ?? 1);
   }
 
+  // Pre-flight 1: claude binary exists on PATH. Surface ENOENT/EACCES
+  // through handleSpawnError before doing any network work — keeps the
+  // missing-binary error path identical to the prior behavior (ERR-01).
+  const versionCheck = spawnSync('claude', ['--version'], { stdio: 'ignore' });
+  if (versionCheck.error) handleSpawnError(versionCheck.error);
+
+  // Pre-flight 2: proxy server reachable on configured port. Without
+  // this, claude spawns and dies inside its retry loop with an opaque
+  // "Unable to connect to API (ConnectionRefused)". Probe /teamclaude/status
+  // with a short timeout; any HTTP response (incl. 401 from a wrong key)
+  // proves the listener is up.
+  const port = config.proxy.port;
+  try {
+    await fetch(`http://localhost:${port}/teamclaude/status`, {
+      headers: { 'x-api-key': config.proxy.apiKey },
+      signal: AbortSignal.timeout(1500),
+    });
+  } catch {
+    console.error(`teamclaude: proxy server not reachable on localhost:${port}.`);
+    console.error('Start it in another terminal: teamclaude server');
+    process.exit(1);
+  }
+
   // Only set ANTHROPIC_BASE_URL — Claude Code keeps its own OAuth token
   // which the proxy accepts from localhost. Not setting ANTHROPIC_API_KEY
   // lets Claude Code stay in subscription mode (full model access).

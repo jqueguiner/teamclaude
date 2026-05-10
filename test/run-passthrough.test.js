@@ -11,16 +11,58 @@
 // (P7 guards env-var injection — protects against accidental removal of
 // ANTHROPIC_BASE_URL injection during refactors.)
 
-import { test } from 'node:test';
+import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import fs from 'node:fs';
+import os from 'node:os';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '..');
 const indexPath = path.join(repoRoot, 'src/index.js');
 const fixturesDir = path.join(repoRoot, 'test/fixtures');
+
+// Stub proxy listener — runCommand probes /teamclaude/status before spawning
+// claude. Stub runs in its own process so spawnSync in tests doesn't starve
+// the listener's event loop. The stub prints `PORT=<n>` on startup; we pin
+// that port in a temp config and pass TEAMCLAUDE_CONFIG to the child.
+let stubProc;
+let stubPort;
+let tempConfigPath;
+
+before(async () => {
+  stubProc = spawn(process.execPath, [path.join(fixturesDir, 'stub-proxy.js')], {
+    stdio: ['ignore', 'pipe', 'inherit'],
+  });
+  stubPort = await new Promise((resolve, reject) => {
+    let buf = '';
+    stubProc.stdout.on('data', chunk => {
+      buf += chunk.toString();
+      const m = buf.match(/PORT=(\d+)/);
+      if (m) resolve(Number(m[1]));
+    });
+    stubProc.once('exit', code => reject(new Error(`stub exited ${code}`)));
+    setTimeout(() => reject(new Error('stub startup timeout')), 5000);
+  });
+
+  tempConfigPath = path.join(
+    fs.mkdtempSync(path.join(os.tmpdir(), 'teamclaude-passthrough-')),
+    'config.json',
+  );
+  fs.writeFileSync(tempConfigPath, JSON.stringify({
+    proxy: { port: stubPort, apiKey: 'test-key' },
+    upstream: 'https://api.anthropic.com',
+    switchThreshold: 0.98,
+    accounts: [],
+  }));
+});
+
+after(() => {
+  stubProc.kill('SIGTERM');
+  fs.rmSync(path.dirname(tempConfigPath), { recursive: true, force: true });
+});
 
 function runTeamclaude(extraArgs) {
   return spawnSync('node', [indexPath, 'run', ...extraArgs], {
@@ -28,6 +70,7 @@ function runTeamclaude(extraArgs) {
     env: {
       ...process.env,
       PATH: fixturesDir + path.delimiter + process.env.PATH,
+      TEAMCLAUDE_CONFIG: tempConfigPath,
     },
   });
 }
