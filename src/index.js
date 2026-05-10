@@ -1,7 +1,10 @@
 #!/usr/bin/env node
 
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createInterface } from 'node:readline';
+import { openSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { loadOrCreateConfig, loadConfig, saveConfig, atomicConfigUpdate, getConfigPath } from './config.js';
 import { AccountManager } from './account-manager.js';
 import { createProxyServer } from './server.js';
@@ -358,6 +361,68 @@ function handleSpawnError(err) {
   process.exit(1);
 }
 
+/**
+ * Probe the proxy /teamclaude/status with a short timeout. Returns true if
+ * any HTTP response is received (incl. 401 from a wrong key) — that proves
+ * the listener is up. Network/timeout/refusal all return false.
+ */
+async function probeProxy(port, apiKey) {
+  try {
+    await fetch(`http://localhost:${port}/teamclaude/status`, {
+      headers: { 'x-api-key': apiKey },
+      signal: AbortSignal.timeout(1500),
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Y/N prompt on stderr (stdout is reserved for child claude passthrough).
+ * Empty answer takes the default. Used only when stdin/stderr are TTYs.
+ */
+async function promptYesNo(question, defaultYes) {
+  const rl = createInterface({ input: process.stdin, output: process.stderr });
+  const suffix = defaultYes ? '[Y/n]' : '[y/N]';
+  try {
+    const ans = await new Promise(resolve => rl.question(`${question} ${suffix} `, resolve));
+    const t = ans.trim().toLowerCase();
+    if (!t) return defaultYes;
+    return t === 'y' || t === 'yes';
+  } finally {
+    rl.close();
+  }
+}
+
+/**
+ * Spawn `teamclaude server` detached so it survives this run, redirect
+ * stdout+stderr to a tmp log file, then poll /teamclaude/status until it
+ * answers (up to ~8s). Return { ok, logPath } so the caller can surface
+ * the log path on failure (e.g. "no accounts configured" exits server fast).
+ */
+async function startServerDetached(port, apiKey) {
+  const logPath = join(tmpdir(), `teamclaude-server-${Date.now()}.log`);
+  const fd = openSync(logPath, 'a');
+  // Re-invoke this same script: process.execPath is the node binary,
+  // process.argv[1] is the resolved path to src/index.js (works whether
+  // teamclaude was launched via the symlinked bin or `node src/index.js`).
+  const child = spawn(process.execPath, [process.argv[1], 'server'], {
+    detached: true,
+    stdio: ['ignore', fd, fd],
+  });
+  child.unref();
+
+  const deadline = Date.now() + 8000;
+  while (Date.now() < deadline) {
+    if (await probeProxy(port, apiKey)) return { ok: true, logPath };
+    // If the child died early (e.g. no accounts), stop polling.
+    if (child.exitCode !== null) return { ok: false, logPath };
+    await new Promise(resolve => setTimeout(resolve, 250));
+  }
+  return { ok: false, logPath };
+}
+
 async function runCommand() {
   const config = await loadOrCreateConfig();
 
@@ -388,15 +453,26 @@ async function runCommand() {
   // with a short timeout; any HTTP response (incl. 401 from a wrong key)
   // proves the listener is up.
   const port = config.proxy.port;
-  try {
-    await fetch(`http://localhost:${port}/teamclaude/status`, {
-      headers: { 'x-api-key': config.proxy.apiKey },
-      signal: AbortSignal.timeout(1500),
-    });
-  } catch {
+  if (!(await probeProxy(port, config.proxy.apiKey))) {
+    const interactive = process.stdin.isTTY && process.stderr.isTTY;
+    if (!interactive) {
+      console.error(`teamclaude: proxy server not reachable on localhost:${port}.`);
+      console.error('Start it in another terminal: teamclaude server');
+      process.exit(1);
+    }
     console.error(`teamclaude: proxy server not reachable on localhost:${port}.`);
-    console.error('Start it in another terminal: teamclaude server');
-    process.exit(1);
+    if (!(await promptYesNo('Start `teamclaude server` in the background now?', true))) {
+      console.error('Aborted. Run it manually: teamclaude server');
+      process.exit(1);
+    }
+    const { ok, logPath } = await startServerDetached(port, config.proxy.apiKey);
+    if (!ok) {
+      console.error('teamclaude: background server did not become ready in time.');
+      console.error(`Logs: ${logPath}`);
+      console.error('Common cause: no accounts configured. Run `teamclaude login` or `teamclaude import`.');
+      process.exit(1);
+    }
+    console.error(`teamclaude: server started (logs: ${logPath}).`);
   }
 
   // Only set ANTHROPIC_BASE_URL — Claude Code keeps its own OAuth token
