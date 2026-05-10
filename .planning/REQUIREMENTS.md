@@ -98,11 +98,11 @@ Deferred to a future release. Not in the current roadmap.
 | HELP-02 | Phase 1 | Pending |
 | HELP-03 | Phase 1 | Pending |
 | HELP-04 | Phase 1 | Pending |
-| CONF-01 | Phase 1 | Pending |
-| CONF-02 | Phase 1 | Pending |
-| CONF-03 | Phase 1 | Pending |
-| CONF-04 | Phase 1 | Pending |
-| CONF-05 | Phase 1 | Pending |
+| CONF-01 | Phase 2 | Pending |
+| CONF-02 | Phase 2 | Pending |
+| CONF-03 | Phase 2 | Pending |
+| CONF-04 | Phase 2 | Pending |
+| CONF-05 | Phase 2 | Pending |
 | PASS-01 | Phase 1 | Complete |
 | PASS-02 | Phase 1 | Complete |
 | PASS-03 | Phase 1 | Pending |
@@ -116,16 +116,17 @@ Deferred to a future release. Not in the current roadmap.
 | SERV-01 | Phase 0 | Complete |
 | SERV-02 | Phase 0 | Complete |
 | ERR-01 | Phase 1 | Pending |
-| ERR-02 | Phase 1 | Pending |
-| ERR-03 | Phase 1 | Pending |
-| LOG-01 | Phase 1 | Pending |
-| LOG-02 | Phase 1 | Pending |
-| LOG-03 | Phase 1 | Pending |
+| ERR-02 | Phase 2 | Pending |
+| ERR-03 | Phase 2 | Pending |
+| LOG-01 | Phase 2 | Pending |
+| LOG-02 | Phase 2 | Pending |
+| LOG-03 | Phase 2 | Pending |
 
 **Coverage:**
-- v1 requirements: 26 total
+- v1 requirements: 27 total
 - Phase 0 (complete): 6
-- Phase 1 (pending): 20
+- Phase 1 (pending): 11 (HELP-01-04, PASS-01-03, COMPAT-01-03, ERR-01)
+- Phase 2 (pending): 10 (CONF-01-05, ERR-02-03, LOG-01-03)
 - Unmapped: 0 ✓
 
 ---
