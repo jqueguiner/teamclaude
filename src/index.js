@@ -332,12 +332,49 @@ async function envCommand() {
 
 // ── run ─────────────────────────────────────────────────────
 
+/**
+ * Single source of truth for spawn-error messaging on the `claude` subprocess.
+ * Used by both the help-delegation branch (HELP-04) and the main passthrough
+ * branch (ERR-01). Always exits the process — never returns.
+ *
+ * Messages are intentionally actionable: name the binary, mention PATH,
+ * and include a copy-pasteable install hint. Stack traces are NOT printed
+ * (T-01-03 mitigation: avoid leaking internal paths).
+ */
+function handleSpawnError(err) {
+  if (err.code === 'ENOENT') {
+    // Install hint sourced from npmjs.com/package/@anthropic-ai/claude-code
+    // (canonical CLI distribution). Kept as a copy-pasteable command.
+    console.error('teamclaude: `claude` binary not found in PATH.');
+    console.error('Install Claude Code: npm install -g @anthropic-ai/claude-code');
+    console.error('Then verify with: which claude && claude --version');
+  } else if (err.code === 'EACCES') {
+    console.error(`teamclaude: cannot execute \`claude\`: ${err.message}`);
+    console.error('Check the file permissions on the resolved binary (chmod +x).');
+  } else {
+    console.error(`teamclaude: failed to start \`claude\`: ${err.message} (${err.code ?? 'unknown'})`);
+    console.error('Check that Claude Code is installed and accessible.');
+  }
+  process.exit(1);
+}
+
 async function runCommand() {
   const config = await loadOrCreateConfig();
 
   // Everything after 'run' (skip -- separator if present)
   const claudeArgs = args.slice(1);
   if (claudeArgs[0] === '--') claudeArgs.shift();
+
+  // HELP-01..03: delegate `--help` / `-h` to `claude --help` verbatim,
+  // with no teamclaude header (HELP-01 requires "no modification"). Any
+  // trailing flags after --help are deliberately dropped — `claude --help`
+  // is spawned with exactly those two args. Exit code propagates verbatim
+  // (HELP-02). `-h` is handled identically to `--help` (HELP-03).
+  if (claudeArgs[0] === '--help' || claudeArgs[0] === '-h') {
+    const helpResult = spawnSync('claude', ['--help'], { stdio: 'inherit' });
+    if (helpResult.error) handleSpawnError(helpResult.error);
+    process.exit(helpResult.status ?? 1);
+  }
 
   // Only set ANTHROPIC_BASE_URL — Claude Code keeps its own OAuth token
   // which the proxy accepts from localhost. Not setting ANTHROPIC_API_KEY
@@ -351,14 +388,7 @@ async function runCommand() {
     },
   });
 
-  if (result.error) {
-    if (result.error.code === 'ENOENT') {
-      console.error('Claude Code not found in PATH. Install it first.');
-    } else {
-      console.error(`Failed to start claude: ${result.error.message}`);
-    }
-    process.exit(1);
-  }
+  if (result.error) handleSpawnError(result.error);
 
   process.exit(result.status ?? 1);
 }
