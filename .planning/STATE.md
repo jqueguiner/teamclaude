@@ -67,9 +67,10 @@ None yet.
 | Date       | Task                                                   | Slug                     | Status     |
 |------------|--------------------------------------------------------|--------------------------|------------|
 | 2026-05-11 | Claude Code statusline footer + accounts usage display | claude-statusline-footer | complete ✓ |
+| 2026-05-11 | Codex + Gemini act-as-Claude backend accounts          | codex-gemini-backends    | complete ✓ |
 
 ## Session Continuity
 
 Last session: 2026-05-11
-Stopped at: Quick task — claude-statusline-footer — shipped
+Stopped at: Quick task — codex-gemini-backends — shipped
 Resume file: None

@@ -1,6 +1,7 @@
 import http from 'node:http';
 import { writeFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
+import { isCliBackend, runCliBackend } from './cli-backend.js';
 
 
 const HOP_BY_HOP_HEADERS = new Set([
@@ -174,6 +175,26 @@ async function forwardRequest(req, res, body, accountManager, upstream, retryCou
   // Track which account handles this request
   ctx.account = account.name;
   hooks.onRequestRouted?.(reqId, { account: account.name });
+
+  // CLI backends (codex/gemini) act as the model — no upstream fetch,
+  // no token refresh, no rate-limit header handling. Dispatch and bail.
+  if (isCliBackend(account.type)) {
+    try {
+      await runCliBackend(account, body, res, accountManager, hooks, reqId);
+      ctx.status = res.statusCode || 200;
+    } catch (err) {
+      console.error(`[TeamClaude] CLI backend error (account "${account.name}"):`, err.message);
+      ctx.status = 502;
+      if (!res.headersSent) {
+        res.writeHead(502, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          type: 'error',
+          error: { type: 'proxy_error', message: `CLI backend error: ${err.message}` },
+        }));
+      }
+    }
+    return;
+  }
 
   // Refresh OAuth token if needed
   await accountManager.ensureTokenFresh(account.index);

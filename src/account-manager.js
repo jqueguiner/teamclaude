@@ -24,10 +24,11 @@ export class AccountManager {
       name: acct.name,
       type: acct.type,
       accountUuid: acct.accountUuid || null,
-      credential: acct.accessToken || acct.apiKey,
+      credential: acct.accessToken || acct.apiKey || null,
       refreshToken: acct.refreshToken || null,
       expiresAt: acct.expiresAt || null,
       status: 'active',
+      disabled: acct.disabled === true,
       quota: emptyQuota(),
       usage: {
         totalInputTokens: 0,
@@ -55,6 +56,7 @@ export class AccountManager {
 
   _isAvailable(account) {
     if (!account) return false;
+    if (account.disabled) return false;
 
     // Check rate limit expiry
     if (account.status === 'throttled' && account.rateLimitedUntil) {
@@ -65,6 +67,8 @@ export class AccountManager {
     }
 
     if (account.status === 'exhausted' || account.status === 'error') return false;
+    // CLI backends (codex/gemini) don't have Anthropic-shaped quotas to gate on
+    if (account.type === 'codex' || account.type === 'gemini') return true;
     if (this._isNearQuota(account)) return false;
 
     return true;
@@ -301,10 +305,11 @@ export class AccountManager {
       name: acctData.name,
       type: acctData.type,
       accountUuid: acctData.accountUuid || null,
-      credential: acctData.accessToken || acctData.apiKey,
+      credential: acctData.accessToken || acctData.apiKey || null,
       refreshToken: acctData.refreshToken || null,
       expiresAt: acctData.expiresAt || null,
       status: 'active',
+      disabled: acctData.disabled === true,
       quota: emptyQuota(),
       usage: { totalInputTokens: 0, totalOutputTokens: 0, totalRequests: 0, lastUsed: null },
       rateLimitedUntil: null,
@@ -337,6 +342,7 @@ export class AccountManager {
         name: a.name,
         type: a.type,
         status: a.status,
+        disabled: a.disabled === true,
         quota: { ...a.quota },
         usage: { ...a.usage },
         rateLimitedUntil: a.rateLimitedUntil

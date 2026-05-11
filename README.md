@@ -82,6 +82,32 @@ For Anthropic API key accounts (billed via Console):
 teamclaude login --api
 ```
 
+### Codex / Gemini CLI backends (act-as-Claude)
+
+Treat the local `codex` or `gemini` CLI as a Claude account: teamclaude spawns the
+binary in headless mode, feeds it the conversation, and translates its output back
+into the Anthropic Messages shape. Useful for falling back to a different vendor
+once your Claude quota is exhausted.
+
+```bash
+# Add the local codex CLI as a Claude-shaped backend account
+teamclaude login --codex
+
+# Same with Gemini
+teamclaude login --gemini
+```
+
+Each backend reuses whatever auth you already set up (`codex login`,
+`gemini`'s own interactive auth) — teamclaude doesn't store any credentials
+for these. The rotator treats them as peers of OAuth/apikey accounts, so they
+get picked up automatically when other accounts hit quota.
+
+**Caveat:** Codex and Gemini CLIs are *agents* — they run their own tool
+loops (file edits, shell). When Claude Code sends a request with its own
+`tools` array, those tools are not translated to the backend's tool protocol;
+the backend agent picks its own tools, runs them in its own sandbox, and
+returns its final text answer as a single `assistant` content block.
+
 ## Usage
 
 ### Start the proxy server
@@ -132,6 +158,8 @@ teamclaude accounts -v       # Also show token expiry times
 teamclaude status            # Show live proxy status (requires running server)
 teamclaude statusline        # One-line footer for Claude Code statusLine
 teamclaude remove <name>     # Remove an account
+teamclaude disable <name>    # Skip an account during rotation (without removing it)
+teamclaude enable <name>     # Re-enable a previously disabled account
 teamclaude api <path>        # Call an API endpoint with account credentials
 teamclaude help              # Show all commands
 ```

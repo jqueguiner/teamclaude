@@ -9,6 +9,7 @@ import { loadOrCreateConfig, loadConfig, saveConfig, atomicConfigUpdate, getConf
 import { AccountManager } from './account-manager.js';
 import { createProxyServer } from './server.js';
 import { importCredentials, loginOAuth, fetchProfile, refreshAccessToken, isTokenExpiringSoon, probeQuota } from './oauth.js';
+import { probeCliInstalled } from './cli-backend.js';
 import { TUI } from './tui.js';
 
 const args = process.argv.slice(2);
@@ -47,6 +48,14 @@ switch (command) {
     break;
   case 'remove':
     await removeCommand();
+    process.exit(0);
+    break;
+  case 'enable':
+    await toggleAccountCommand(false);
+    process.exit(0);
+    break;
+  case 'disable':
+    await toggleAccountCommand(true);
     process.exit(0);
     break;
   case 'api':
@@ -260,6 +269,14 @@ async function loginCommand() {
     await loginOAuthCommand();
     return;
   }
+  if (args.includes('--codex')) {
+    await loginCliBackendCommand('codex');
+    return;
+  }
+  if (args.includes('--gemini')) {
+    await loginCliBackendCommand('gemini');
+    return;
+  }
 
   // Default to OAuth if not a TTY
   if (!process.stdout.isTTY) {
@@ -272,6 +289,8 @@ async function loginCommand() {
   console.log('Select login method:\n');
   console.log('  1. Claude subscription  (Pro, Max, Team, Enterprise)');
   console.log('  2. Anthropic API key    (Console API billing)');
+  console.log('  3. Codex CLI backend    (uses local `codex` binary as Claude)');
+  console.log('  4. Gemini CLI backend   (uses local `gemini` binary as Claude)');
   console.log('');
   const choice = await new Promise(resolve => rl.question('Choice [1]: ', resolve));
   rl.close();
@@ -279,10 +298,70 @@ async function loginCommand() {
   switch (choice.trim() || '1') {
     case '1': await loginOAuthCommand(); break;
     case '2': await loginApiCommand(); break;
+    case '3': await loginCliBackendCommand('codex'); break;
+    case '4': await loginCliBackendCommand('gemini'); break;
     default:
       console.error(`Invalid choice: ${choice.trim()}`);
       process.exit(1);
   }
+}
+
+async function loginCliBackendCommand(type) {
+  const config = await loadOrCreateConfig();
+  const probe = probeCliInstalled(type);
+  if (!probe.ok) {
+    console.error(`Cannot add ${type} backend: ${probe.error}`);
+    console.error('');
+    if (type === 'codex') {
+      console.error('Install with: npm install -g @openai/codex   (or your preferred channel)');
+      console.error('Then log in:  codex login');
+    } else {
+      console.error('Install Gemini CLI per Google\'s docs, then run: gemini   (interactive login)');
+    }
+    process.exit(1);
+  }
+  console.log(`Detected ${type}: ${probe.version}`);
+
+  let name = argValue('--name') || type;
+  const existingIdx = config.accounts.findIndex(a => a.name === name);
+  const record = { name, type, source: 'cli' };
+
+  if (existingIdx >= 0) {
+    config.accounts[existingIdx] = record;
+    console.log(`Updated account "${name}"`);
+  } else {
+    config.accounts.push(record);
+    console.log(`Added ${type} backend account "${name}"`);
+  }
+  await saveConfig(config);
+  console.log(`Saved to ${getConfigPath()}`);
+  console.log('');
+  console.log(`This account routes Claude Code requests through \`${type}\` running locally.`);
+  console.log(`Caveat: claude-code tools won't pass through — the \`${type}\` agent picks`);
+  console.log('its own tools and returns its final text answer as the assistant message.');
+}
+
+async function toggleAccountCommand(disable) {
+  const config = await loadOrCreateConfig();
+  const name = args[1];
+  if (!name) {
+    console.error(`Usage: teamclaude ${disable ? 'disable' : 'enable'} <account-name>`);
+    process.exit(1);
+  }
+  const idx = config.accounts.findIndex(a => a.name === name);
+  if (idx < 0) {
+    console.error(`Account "${name}" not found`);
+    process.exit(1);
+  }
+  if (disable) {
+    config.accounts[idx].disabled = true;
+    console.log(`Disabled account "${name}" (rotator will skip it)`);
+  } else {
+    delete config.accounts[idx].disabled;
+    console.log(`Enabled account "${name}"`);
+  }
+  await saveConfig(config);
+  console.log(`Saved to ${getConfigPath()}`);
 }
 
 async function loginApiCommand() {
@@ -699,9 +778,23 @@ async function accountsCommand() {
   for (const [i, a] of config.accounts.entries()) {
     const p = profiles[i];
 
+    if (a.type === 'codex' || a.type === 'gemini') {
+      const active = proxyStatus && proxyStatus.currentAccount === a.name ? ' *' : '';
+      const disabledTag = a.disabled ? ' [disabled]' : '';
+      const probe = probeCliInstalled(a.type);
+      const versionTag = probe.ok ? ` ${probe.version}` : ' (binary missing)';
+      console.log(`  [${i + 1}] ${a.name} (${a.type})${versionTag}${disabledTag}${active}`);
+      const lq = proxyStatus?.accounts?.find(x => x.name === a.name)?.usage;
+      if (lq && lq.totalRequests) {
+        console.log(`       Requests: ${lq.totalRequests} (last: ${lq.lastUsed || 'never'})`);
+      }
+      continue;
+    }
+
     if (a.type === 'apikey') {
       const active = proxyStatus && proxyStatus.currentAccount === a.name ? ' *' : '';
-      console.log(`  [${i + 1}] ${a.name} (apikey)  ${a.apiKey?.slice(0, 15)}...${active}`);
+      const disabledTag = a.disabled ? ' [disabled]' : '';
+      console.log(`  [${i + 1}] ${a.name} (apikey)  ${a.apiKey?.slice(0, 15)}...${disabledTag}${active}`);
       const lq = proxyStatus?.accounts?.find(x => x.name === a.name)?.quota;
       if (lq?.tokensLimit) {
         const tok = ((1 - lq.tokensRemaining / lq.tokensLimit) * 100).toFixed(0);
@@ -718,7 +811,8 @@ async function accountsCommand() {
     const status = hasProfile ? `Claude ${tier}` : `unknown (${p?.error || 'no token'})`;
     const src = a.source ? `, ${a.source}` : '';
     const active = proxyStatus && proxyStatus.currentAccount === a.name ? ' *' : '';
-    console.log(`  [${i + 1}] ${a.name} (${status}${src})${active}`);
+    const disabledTag = a.disabled ? ' [disabled]' : '';
+    console.log(`  [${i + 1}] ${a.name} (${status}${src})${disabledTag}${active}`);
     if (hasProfile && p.email && p.email !== a.name) console.log(`       Email: ${p.email}`);
     if (hasProfile && p.orgName) console.log(`       Org:   ${p.orgName}`);
 
@@ -858,6 +952,8 @@ Commands:
   import              Import credentials from Claude Code
   login               OAuth login via browser
   login --api         Add an API key account
+  login --codex       Add 'codex' CLI as a Claude-shaped backend
+  login --gemini      Add 'gemini' CLI as a Claude-shaped backend
   env                 Print env vars to use with Claude
   run [-- args...]    Run Claude Code through the proxy
   status              Show proxy & account status (live)
@@ -865,6 +961,8 @@ Commands:
   statusline          One-line footer for Claude Code statusLine
                       (e.g. "alice s:42% w:18%")
   remove <name>       Remove an account
+  enable <name>       Re-enable a previously disabled account
+  disable <name>      Disable an account (rotator skips it)
   api <path>          Call an API endpoint with account credentials
   help                Show this help
 
@@ -1014,7 +1112,7 @@ async function resolveAccounts(config) {
       if (acct.importFrom) {
         try {
           const creds = await importCredentials(acct.importFrom);
-          accounts.push({ name: acct.name, type: 'oauth', ...creds });
+          accounts.push({ name: acct.name, type: 'oauth', disabled: acct.disabled, ...creds });
           console.log(`Imported "${acct.name}" from ${acct.importFrom}`);
         } catch (err) {
           console.error(`Failed to import "${acct.name}": ${err.message}`);
@@ -1026,6 +1124,16 @@ async function resolveAccounts(config) {
       }
     } else if (acct.type === 'apikey' && acct.apiKey) {
       accounts.push(acct);
+    } else if (acct.type === 'codex' || acct.type === 'gemini') {
+      // CLI backend — pre-flight the binary so we don't hand out an account
+      // that will fail every request. Skip silently when missing; the user
+      // gets a startup-log line and can re-add after installing the binary.
+      const probe = probeCliInstalled(acct.type);
+      if (!probe.ok) {
+        console.error(`Skipping ${acct.type} backend "${acct.name}": ${probe.error}`);
+        continue;
+      }
+      accounts.push({ name: acct.name, type: acct.type, disabled: acct.disabled });
     }
   }
   return accounts;
