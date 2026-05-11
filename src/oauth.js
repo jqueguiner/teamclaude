@@ -139,6 +139,64 @@ export async function fetchProfile(accessToken) {
   }
 }
 
+/**
+ * Probe an OAuth account's current rate-limit utilization by issuing a tiny
+ * /v1/messages call (max_tokens: 1) — the cheapest path that still returns
+ * the `anthropic-ratelimit-unified-*` headers. /v1/messages/count_tokens does
+ * NOT emit those headers, so we have to make a real (but minimal) request.
+ *
+ * Cost: ~1 input + 1 output token per probe. Does count against quota.
+ * Callers should avoid probing on a hot path. We rely on Claude's pricing
+ * being trivial at this scale (sub-cent per probe).
+ *
+ * Returns { unified5h, unified7d, unified5hReset, unified7dReset } on success
+ * (any field may be null if upstream didn't include it), or null on any
+ * failure. Never throws — designed for best-effort UI display.
+ */
+export async function probeQuota(accessToken, { timeoutMs = 5000, upstream = 'https://api.anthropic.com', model = 'claude-haiku-4-5-20251001' } = {}) {
+  try {
+    const res = await fetch(`${upstream}/v1/messages`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+        'anthropic-version': '2023-06-01',
+        'anthropic-beta': 'oauth-2025-04-20',
+      },
+      body: JSON.stringify({
+        model,
+        max_tokens: 1,
+        messages: [{ role: 'user', content: 'hi' }],
+      }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+
+    const u5h = parseFloat(res.headers.get('anthropic-ratelimit-unified-5h-utilization'));
+    const u7d = parseFloat(res.headers.get('anthropic-ratelimit-unified-7d-utilization'));
+    const r5h = res.headers.get('anthropic-ratelimit-unified-5h-reset');
+    const r7d = res.headers.get('anthropic-ratelimit-unified-7d-reset');
+
+    // No rate-limit headers at all → treat as failure (auth/version/etc).
+    if (isNaN(u5h) && isNaN(u7d) && !r5h && !r7d) {
+      // Drain body to free the connection cleanly, then bail.
+      try { await res.arrayBuffer(); } catch { /* noop */ }
+      return null;
+    }
+
+    // Drain body so the socket can be reused.
+    try { await res.arrayBuffer(); } catch { /* noop */ }
+
+    return {
+      unified5h: isNaN(u5h) ? null : u5h,
+      unified7d: isNaN(u7d) ? null : u7d,
+      unified5hReset: r5h ? parseInt(r5h, 10) * 1000 : null,
+      unified7dReset: r7d ? parseInt(r7d, 10) * 1000 : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
 // OAuth config (extracted from Claude Code)
 const OAUTH_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
 const OAUTH_AUTHORIZE = 'https://claude.ai/oauth/authorize';

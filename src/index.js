@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { loadOrCreateConfig, loadConfig, saveConfig, atomicConfigUpdate, getConfigPath } from './config.js';
 import { AccountManager } from './account-manager.js';
 import { createProxyServer } from './server.js';
-import { importCredentials, loginOAuth, fetchProfile, refreshAccessToken, isTokenExpiringSoon } from './oauth.js';
+import { importCredentials, loginOAuth, fetchProfile, refreshAccessToken, isTokenExpiringSoon, probeQuota } from './oauth.js';
 import { TUI } from './tui.js';
 
 const args = process.argv.slice(2);
@@ -656,6 +656,20 @@ async function accountsCommand() {
     fetchProxyStatus(config, 800),
   ]);
 
+  // For OAuth accounts the proxy has no quota data on (untouched accounts
+  // never get rate-limit headers from upstream), probe each one directly via
+  // POST /v1/messages/count_tokens — a free endpoint that still returns the
+  // same rate-limit headers. Run probes in parallel; null on failure.
+  const probedQuotas = await Promise.all(config.accounts.map(async (a) => {
+    if (a.type !== 'oauth' || !a.accessToken) return null;
+    const live = proxyStatus?.accounts?.find(x => x.name === a.name)?.quota;
+    if (live && (live.unified5h != null || live.unified7d != null
+                 || live.unified5hReset || live.unified7dReset)) {
+      return null; // already have data from the proxy
+    }
+    return await probeQuota(a.accessToken, { upstream: config.upstream });
+  }));
+
   // Deduplicate by accountUuid — keep the last (most recently added) entry
   const seen = new Map();
   let removed = 0;
@@ -708,9 +722,15 @@ async function accountsCommand() {
     if (hasProfile && p.email && p.email !== a.name) console.log(`       Email: ${p.email}`);
     if (hasProfile && p.orgName) console.log(`       Org:   ${p.orgName}`);
 
-    // Live quota usage + reset (only when proxy is reachable and has tracked traffic)
+    // Live quota usage + reset. Source of truth in priority order:
+    //   1. Proxy-tracked quota (if proxy is running and routed traffic through this account)
+    //   2. Direct probe via /v1/messages/count_tokens (for accounts the proxy has no data on)
     const live = proxyStatus?.accounts?.find(x => x.name === a.name);
-    const lq = live?.quota;
+    const probed = probedQuotas[i];
+    const lq = live?.quota && (live.quota.unified5h != null || live.quota.unified7d != null
+                               || live.quota.unified5hReset || live.quota.unified7dReset)
+      ? live.quota
+      : probed;
     if (lq) {
       if (lq.unified5h != null || lq.unified5hReset) {
         const reset = fmtResetDuration(lq.unified5hReset);
