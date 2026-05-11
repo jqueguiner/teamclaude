@@ -162,3 +162,36 @@ test('codexEventToAnthropic closes on task_complete', () => {
   assert.match(out[2], /event: message_stop/);
   assert.equal(state.done, true);
 });
+
+test('codexEventToAnthropic handles item.completed.agent_message.text shape', () => {
+  // Real codex --json event shape (verified against codex-cli 0.128.0):
+  //   {"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"hi"}}
+  const state = {};
+  const out = codexEventToAnthropic(
+    { type: 'item.completed', item: { id: 'item_0', type: 'agent_message', text: 'real-shape' } },
+    state, 'msg_x', 'm',
+  );
+  assert.equal(out.length, 3); // message_start + content_block_start + content_block_delta
+  assert.match(out[2], /"text":"real-shape"/);
+});
+
+test('codexEventToAnthropic extracts usage from turn.completed', () => {
+  // Real shape:
+  //   {"type":"turn.completed","usage":{"input_tokens":21366,"cached_input_tokens":3456,
+  //    "output_tokens":64,"reasoning_output_tokens":57}}
+  const state = { messageStarted: true, blockOpen: true };
+  const out = codexEventToAnthropic(
+    {
+      type: 'turn.completed',
+      usage: { input_tokens: 21366, cached_input_tokens: 3456, output_tokens: 64, reasoning_output_tokens: 57 },
+    },
+    state, 'msg_x', 'm',
+  );
+  const delta = out.find(s => s.includes('event: message_delta'));
+  assert.ok(delta);
+  assert.match(delta, /"input_tokens":21366/);
+  // output (64) + reasoning_output (57) = 121
+  assert.match(delta, /"output_tokens":121/);
+  assert.equal(state.inputTokens, 21366);
+  assert.equal(state.outputTokens, 121);
+});

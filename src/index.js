@@ -786,7 +786,13 @@ async function accountsCommand() {
       console.log(`  [${i + 1}] ${a.name} (${a.type})${versionTag}${disabledTag}${active}`);
       const lq = proxyStatus?.accounts?.find(x => x.name === a.name)?.usage;
       if (lq && lq.totalRequests) {
-        console.log(`       Requests: ${lq.totalRequests} (last: ${lq.lastUsed || 'never'})`);
+        const tokens = (lq.totalInputTokens || 0) + (lq.totalOutputTokens || 0);
+        const tokenLine = tokens
+          ? ` (${lq.totalInputTokens || 0} in / ${lq.totalOutputTokens || 0} out)`
+          : '';
+        console.log(`       Requests: ${lq.totalRequests}${tokenLine}, last: ${lq.lastUsed || 'never'}`);
+      } else {
+        console.log(`       No quota API for ${a.type}; per-request usage tallied once traffic flows`);
       }
       continue;
     }

@@ -393,6 +393,12 @@ async function runStreamingPipeline(child, account, model, messageId, res, lastM
 
   res.end();
 
+  // Account-wide token tally — same updateUsage path Anthropic accounts use,
+  // so `teamclaude accounts` shows a consistent "Total: N tokens" line.
+  if (accountManager?.updateUsage && (state.inputTokens || state.outputTokens)) {
+    accountManager.updateUsage(account.index, state.inputTokens || 0, state.outputTokens || 0);
+  }
+
   await cleanupImages();
   if (lastMsgFile) { try { await unlink(lastMsgFile); } catch {} }
 
@@ -454,6 +460,10 @@ async function runBufferedPipeline(child, account, model, messageId, res, lastMs
     return respondError(res, 502, 'proxy_error', `${account.type} backend failed: ${err}`);
   }
 
+  if (accountManager?.updateUsage && (usage.input_tokens || usage.output_tokens)) {
+    accountManager.updateUsage(account.index, usage.input_tokens, usage.output_tokens);
+  }
+
   const response = {
     id: messageId,
     type: 'message',
@@ -509,7 +519,8 @@ function collectEventForBuffer(line, type) {
     if (text) return { text };
   }
   if (event.type === 'task_complete' || event.type === 'turn.completed' || event.type === 'completion') {
-    return { done: true };
+    const usage = extractCodexUsage(event);
+    return { done: true, usage: usage || undefined };
   }
   return null;
 }
@@ -552,10 +563,13 @@ export function codexEventToAnthropic(event, state, messageId, model) {
       state.blockOpen = false;
       out.push(sse('content_block_stop', { type: 'content_block_stop', index: 0 }));
     }
+    const usage = extractCodexUsage(event) || { input_tokens: 0, output_tokens: 0 };
+    state.inputTokens = usage.input_tokens;
+    state.outputTokens = usage.output_tokens;
     out.push(sse('message_delta', {
       type: 'message_delta',
       delta: { stop_reason: 'end_turn', stop_sequence: null },
-      usage: { input_tokens: 0, output_tokens: 0 },
+      usage,
     }));
     out.push(sse('message_stop', { type: 'message_stop' }));
     state.done = true;
@@ -566,14 +580,35 @@ export function codexEventToAnthropic(event, state, messageId, model) {
 function extractCodexText(event) {
   if (!event || typeof event !== 'object') return '';
   // Common shapes observed across codex CLI releases:
+  //   {"type":"agent_message","message":"..."}                     (older)
+  //   {"msg":{"type":"agent_message","message":"..."}}             (wrapper)
+  //   {"type":"item.completed","item":{"type":"agent_message","text":"..."}}
+  //   {"type":"message","content":"..."}                           (generic)
   if (event.type === 'agent_message' && typeof event.message === 'string') return event.message;
   if (event.msg?.type === 'agent_message' && typeof event.msg.message === 'string') return event.msg.message;
+  if (event.item?.type === 'agent_message' && typeof event.item.text === 'string') return event.item.text;
   if (event.type === 'message' && typeof event.content === 'string') return event.content;
   if (event.item?.content && Array.isArray(event.item.content)) {
     return event.item.content.map(c => (typeof c === 'string' ? c : c?.text || '')).join('');
   }
   if (event.delta && typeof event.delta === 'string') return event.delta;
   return '';
+}
+
+/**
+ * Pull token usage from a codex event. Real shape:
+ *   {"type":"turn.completed","usage":{"input_tokens":N,"output_tokens":N,
+ *    "cached_input_tokens":N,"reasoning_output_tokens":N}}
+ * Returns {input_tokens, output_tokens} or null. Reasoning tokens roll into
+ * output_tokens — they bill identically and Anthropic clients don't model them.
+ */
+function extractCodexUsage(event) {
+  const u = event?.usage || event?.msg?.usage;
+  if (!u || typeof u !== 'object') return null;
+  const input = num(u.input_tokens) || num(u.input) || 0;
+  const output = (num(u.output_tokens) || 0) + (num(u.reasoning_output_tokens) || 0);
+  if (!input && !output) return null;
+  return { input_tokens: input, output_tokens: output };
 }
 
 function isCodexDone(event) {
