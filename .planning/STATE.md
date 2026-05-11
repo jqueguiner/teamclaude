@@ -62,8 +62,14 @@ None yet.
 | Env-var conflicts | CONF-06/07: `ANTHROPIC_*` env-var detection at startup | Deferred to v2 | 2026-05-10 |
 | Observability | OBS-01/02: `teamclaude status` command + structured JSON log events | Deferred to v2 | 2026-05-10 |
 
+## Quick Tasks Completed
+
+| Date       | Task                                                   | Slug                     | Status     |
+|------------|--------------------------------------------------------|--------------------------|------------|
+| 2026-05-11 | Claude Code statusline footer + accounts usage display | claude-statusline-footer | complete ✓ |
+
 ## Session Continuity
 
-Last session: 2026-05-10
-Stopped at: Roadmap and state created — Phase 1 ready to plan
+Last session: 2026-05-11
+Stopped at: Quick task — claude-statusline-footer — shipped
 Resume file: None

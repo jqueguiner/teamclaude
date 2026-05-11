@@ -41,6 +41,10 @@ switch (command) {
     await accountsCommand();
     process.exit(0);
     break;
+  case 'statusline':
+    await statuslineCommand();
+    process.exit(0);
+    break;
   case 'remove':
     await removeCommand();
     process.exit(0);
@@ -533,6 +537,85 @@ async function statusCommand() {
   }
 }
 
+// ── statusline ──────────────────────────────────────────────
+
+/**
+ * Format a quota utilization (0-1 float, or null) as a compact percentage
+ * string. Returns "-" when the proxy hasn't seen any traffic yet.
+ */
+function fmtUsagePct(ratio) {
+  if (ratio == null || isNaN(ratio)) return '-';
+  return `${Math.round(ratio * 100)}%`;
+}
+
+/**
+ * Format a reset timestamp (ms epoch) as a short countdown: "2h30m" / "5d".
+ * Returns "" when the timestamp is in the past or missing.
+ */
+function fmtResetDuration(resetTs) {
+  if (!resetTs) return '';
+  const ms = resetTs - Date.now();
+  if (ms <= 0) return '';
+  const mins = Math.ceil(ms / 60000);
+  if (mins < 60) return `${mins}m`;
+  const hrs = Math.floor(mins / 60);
+  const rm = mins % 60;
+  if (hrs < 24) return rm > 0 ? `${hrs}h${rm}m` : `${hrs}h`;
+  const days = Math.floor(hrs / 24);
+  const rh = hrs % 24;
+  return rh > 0 ? `${days}d${rh}h` : `${days}d`;
+}
+
+/**
+ * Compute the "prefix" of an account name — everything before the first '@'
+ * for email-named accounts; the full name otherwise (api-1, account-2, etc.).
+ */
+function accountPrefix(name) {
+  if (!name) return '?';
+  const at = name.indexOf('@');
+  return at > 0 ? name.slice(0, at) : name;
+}
+
+/**
+ * Fetch /teamclaude/status from the local proxy with a short timeout. Returns
+ * the parsed object on success, or null on any failure. Never throws.
+ */
+async function fetchProxyStatus(config, timeoutMs = 500) {
+  try {
+    const res = await fetch(`http://localhost:${config.proxy.port}/teamclaude/status`, {
+      headers: { 'x-api-key': config.proxy.apiKey },
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Print a single-line Claude Code statusLine footer with the active account
+ * prefix and its session/weekly utilization. Designed for use in
+ * ~/.claude/settings.json:
+ *   { "statusLine": { "type": "command", "command": "teamclaude statusline" } }
+ *
+ * Output is intentionally short and side-effect free: any error condition
+ * (proxy down, no traffic yet) falls back to a stub string instead of
+ * crashing, so the statusline never disappears mid-session.
+ */
+async function statuslineCommand() {
+  const config = await loadOrCreateConfig();
+  const data = await fetchProxyStatus(config, 500);
+  if (!data || !data.currentAccount) {
+    process.stdout.write('teamclaude (offline)');
+    return;
+  }
+  const acct = data.accounts?.find(a => a.name === data.currentAccount);
+  const q = acct?.quota || {};
+  const prefix = accountPrefix(data.currentAccount);
+  process.stdout.write(`${prefix} s:${fmtUsagePct(q.unified5h)} w:${fmtUsagePct(q.unified7d)}`);
+}
+
 // ── accounts ────────────────────────────────────────────────
 
 async function accountsCommand() {
@@ -562,12 +645,16 @@ async function accountsCommand() {
   }));
   if (configDirty) await saveConfig(config);
 
-  // Fetch profiles in parallel for all OAuth accounts
-  const profiles = await Promise.all(
-    config.accounts.map(a =>
-      a.type === 'oauth' && a.accessToken ? fetchProfile(a.accessToken) : null
-    )
-  );
+  // Fetch profiles in parallel for all OAuth accounts. In parallel, try to
+  // grab live quota state from the proxy — best effort, null when offline.
+  const [profiles, proxyStatus] = await Promise.all([
+    Promise.all(
+      config.accounts.map(a =>
+        a.type === 'oauth' && a.accessToken ? fetchProfile(a.accessToken) : null
+      )
+    ),
+    fetchProxyStatus(config, 800),
+  ]);
 
   // Deduplicate by accountUuid — keep the last (most recently added) entry
   const seen = new Map();
@@ -599,7 +686,15 @@ async function accountsCommand() {
     const p = profiles[i];
 
     if (a.type === 'apikey') {
-      console.log(`  [${i + 1}] ${a.name} (apikey)  ${a.apiKey?.slice(0, 15)}...`);
+      const active = proxyStatus && proxyStatus.currentAccount === a.name ? ' *' : '';
+      console.log(`  [${i + 1}] ${a.name} (apikey)  ${a.apiKey?.slice(0, 15)}...${active}`);
+      const lq = proxyStatus?.accounts?.find(x => x.name === a.name)?.quota;
+      if (lq?.tokensLimit) {
+        const tok = ((1 - lq.tokensRemaining / lq.tokensLimit) * 100).toFixed(0);
+        const reset = fmtResetDuration(lq.resetsAt ? new Date(lq.resetsAt).getTime() : null);
+        const tail = reset ? ` (resets in ${reset})` : '';
+        console.log(`       Tokens:  ${tok}% used${tail}`);
+      }
       continue;
     }
 
@@ -608,9 +703,33 @@ async function accountsCommand() {
     const tier = hasProfile ? (p.hasClaudeMax ? 'Max' : p.hasClaudePro ? 'Pro' : 'subscription') : null;
     const status = hasProfile ? `Claude ${tier}` : `unknown (${p?.error || 'no token'})`;
     const src = a.source ? `, ${a.source}` : '';
-    console.log(`  [${i + 1}] ${a.name} (${status}${src})`);
+    const active = proxyStatus && proxyStatus.currentAccount === a.name ? ' *' : '';
+    console.log(`  [${i + 1}] ${a.name} (${status}${src})${active}`);
     if (hasProfile && p.email && p.email !== a.name) console.log(`       Email: ${p.email}`);
     if (hasProfile && p.orgName) console.log(`       Org:   ${p.orgName}`);
+
+    // Live quota usage + reset (only when proxy is reachable and has tracked traffic)
+    const live = proxyStatus?.accounts?.find(x => x.name === a.name);
+    const lq = live?.quota;
+    if (lq) {
+      if (lq.unified5h != null || lq.unified5hReset) {
+        const reset = fmtResetDuration(lq.unified5hReset);
+        const tail = reset ? ` (resets in ${reset})` : '';
+        console.log(`       Session: ${fmtUsagePct(lq.unified5h)} used${tail}`);
+      }
+      if (lq.unified7d != null || lq.unified7dReset) {
+        const reset = fmtResetDuration(lq.unified7dReset);
+        const tail = reset ? ` (resets in ${reset})` : '';
+        console.log(`       Weekly:  ${fmtUsagePct(lq.unified7d)} used${tail}`);
+      }
+      if (lq.unified5h == null && lq.unified7d == null && lq.tokensLimit) {
+        const tok = ((1 - lq.tokensRemaining / lq.tokensLimit) * 100).toFixed(0);
+        const reset = fmtResetDuration(lq.resetsAt ? new Date(lq.resetsAt).getTime() : null);
+        const tail = reset ? ` (resets in ${reset})` : '';
+        console.log(`       Tokens:  ${tok}% used${tail}`);
+      }
+    }
+
     if (verbose && a.expiresAt) {
       const remaining = a.expiresAt - Date.now();
       if (remaining <= 0) {
@@ -722,7 +841,9 @@ Commands:
   env                 Print env vars to use with Claude
   run [-- args...]    Run Claude Code through the proxy
   status              Show proxy & account status (live)
-  accounts            List configured accounts
+  accounts            List configured accounts (with live quota when proxy is up)
+  statusline          One-line footer for Claude Code statusLine
+                      (e.g. "alice s:42% w:18%")
   remove <name>       Remove an account
   api <path>          Call an API endpoint with account credentials
   help                Show this help

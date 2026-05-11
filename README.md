@@ -126,12 +126,34 @@ claude
 
 ```bash
 teamclaude accounts          # List accounts with subscription tier and token status
+                             #   (also shows live session/weekly usage + reset
+                             #   countdown when the proxy server is running)
 teamclaude accounts -v       # Also show token expiry times
 teamclaude status            # Show live proxy status (requires running server)
+teamclaude statusline        # One-line footer for Claude Code statusLine
 teamclaude remove <name>     # Remove an account
 teamclaude api <path>        # Call an API endpoint with account credentials
 teamclaude help              # Show all commands
 ```
+
+### Claude Code statusline footer
+
+`teamclaude statusline` prints a single line showing the active account prefix
+and its session/weekly quota usage — designed for Claude Code's `statusLine`
+setting. Add this to `~/.claude/settings.json`:
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "teamclaude statusline"
+  }
+}
+```
+
+Output looks like `alice s:42% w:18%` (prefix is everything before `@` in the
+account email; `s` is session/5h utilization, `w` is weekly/7d utilization).
+Falls back to `teamclaude (offline)` when the proxy server is not running.
 
 ### Request logging
 
